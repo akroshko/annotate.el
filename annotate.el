@@ -83,6 +83,21 @@
   "Face for annotations."
   :group 'annotate)
 
+(defface annotate-checkmark
+  '((t (:background "green" :foreground "black" )))
+  "Face for highlighting lines checked with a checkmark"
+  :group 'annotate)
+
+(defface annotate-x-mark
+  '((t (:background "red" :foreground "black" )))
+  "Face for highlighting lines checked with an x-mark"
+  :group 'annotate)
+
+(defface annotate-construction-mark
+  '((t (:background "yellow" :foreground "black" )))
+  "Face for highlighting lines checked with an construction-mark"
+  :group 'annotate)
+
 (defcustom annotate-annotation-column 85
   "Where annotations appear."
   :type 'number
@@ -105,6 +120,7 @@
 
 (defun annotate-initialize ()
   "Load annotations and set up save and display hooks."
+  (setq left-margin-width 2)
   (annotate-load-annotations)
   (add-hook 'after-save-hook 'annotate-save-annotations t t)
   (add-hook 'window-configuration-change-hook 'font-lock-fontify-buffer t t)
@@ -124,14 +140,105 @@
 (defun annotate-annotate ()
   "Create, modify, or delete annotation."
   (interactive)
-  (let ((overlay (car (overlays-at (point)))))
+  (let ((overlay (annotate-get-annotate-overlay))
+        did-it)
     (cond ((and (overlayp overlay) (overlay-get overlay 'annotation))
-           (annotate-change-annotation (point)))
+           (when (annotate-change-annotation (point))
+             (setq did-it t))
+           )
           (t
            (cl-destructuring-bind (start end) (annotate-bounds)
-             (annotate-create-annotation start end)))))
-  (font-lock-fontify-block 1)
-  (set-buffer-modified-p t))
+             (annotate-create-annotation start end)
+             (setq did-it t))))
+    (font-lock-fontify-block 1)
+    (when did-it
+      (set-buffer-modified-p t))))
+
+(defun annotate-annotate-checkmark ()
+  "Add a checkmark annotation."
+  (interactive)
+  (let ((overlay (annotate-get-annotate-overlay)))
+    (cond ((and (overlayp overlay) (overlay-get overlay 'annotation))
+           (annotate-create-annotation (overlay-start overlay) (overlay-end overlay) 'checkmark))
+          (t
+           ;; TODO: modify annotate-bounds evantually, get the full line (somehow key on full line)
+           (cl-destructuring-bind (start end) (list (save-excursion
+                                                      (beginning-of-line)
+                                                      (point))
+                                                    (save-excursion
+                                                      (end-of-line)
+                                                      (point)))
+             (annotate-create-annotation start end 'checkmark))))
+    (font-lock-fontify-block 1)
+    (set-buffer-modified-p t)))
+
+(defun annotate-annotate-construction-mark ()
+  "Add a mark indicating inprogress/construction annotation."
+  (interactive)
+  (let ((overlay (annotate-get-annotate-overlay)))
+    (cond ((and (overlayp overlay) (overlay-get overlay 'annotation))
+           (annotate-create-annotation (overlay-start overlay) (overlay-end overlay) 'construction-mark))
+          (t
+           (cl-destructuring-bind (start end) (list (save-excursion
+                                                      (beginning-of-line)
+                                                      (point))
+                                                    (save-excursion
+                                                      (end-of-line)
+                                                      (point)))
+             (annotate-create-annotation start end 'construction-mark))))
+    (font-lock-fontify-block 1)
+    (set-buffer-modified-p t)))
+
+(defun annotate-annotate-x-mark ()
+  "Add an x mark indicating false/cant/etc annotation.  A stop
+sign would be cool."
+  (interactive)
+  (let ((overlay (annotate-get-annotate-overlay)))
+    (cond ((and (overlayp overlay) (overlay-get overlay 'annotation))
+           (annotate-create-annotation (overlay-start overlay) (overlay-end overlay) 'x-mark))
+          (t
+           (cl-destructuring-bind (start end) (list (save-excursion
+                                                      (beginning-of-line)
+                                                      (point))
+                                                    (save-excursion
+                                                      (end-of-line)
+                                                      (point)))
+             (annotate-create-annotation start end 'x-mark)
+             (if (use-region-p) (deactivate-mark))
+             (save-excursion
+               (goto-char end)
+               (font-lock-fontify-block 1)))))
+    (font-lock-fontify-block 1)
+    (set-buffer-modified-p t)))
+
+(defun annotate-annotate-toggle-symbolic (&optional arg)
+  (interactive "P")
+  (let* ((current-symbolic-overlay (annotate-get-annotate-overlay))
+         (current-symbolic-overlay-type (when current-symbolic-overlay
+                                          (overlay-get current-symbolic-overlay 'annotation))))
+    (if current-symbolic-overlay-type
+        (when (symbolp current-symbolic-overlay-type)
+          (cond (arg
+                 (annotate-remove-symbolic))
+                ((eq current-symbolic-overlay-type 'checkmark)
+                 (annotate-annotate-construction-mark))
+                ((eq current-symbolic-overlay-type 'construction-mark)
+                 (annotate-annotate-x-mark))
+                ((eq current-symbolic-overlay-type 'x-mark)
+                 (annotate-remove-symbolic))))
+      (annotate-annotate-checkmark))))
+
+(defun annotate-remove-symbolic ()
+  (let* ((current-symbolic-overlay (annotate-get-annotate-overlay))
+         (current-symbolic-overlay-type (when current-symbolic-overlay
+                                          (overlay-get current-symbolic-overlay 'annotation))))
+    (when (symbolp current-symbolic-overlay-type)
+      (delete-overlay current-symbolic-overlay)
+      ;; TODO: do I want to do something here?
+      )))
+
+;; TODO: for testing
+(define-key annotate-mode-map (kbd "H-1") 'annotate-annotate-toggle-symbolic)
 
 (defun annotate-next-annotation ()
   "Move point to the next annotation."
@@ -179,12 +286,17 @@
   (interactive)
   (let ((file-annotations (annotate-describe-annotations))
         (all-annotations (annotate-load-annotation-data))
-        (filename (substring-no-properties (or (buffer-file-name) ""))))
+        (filename (substring-no-properties (or (buffer-file-name) "")))
+        filename-sha1sum)
+    ;; TODO: use a proper conditon-case block, right now just barf if this command cannot work
+    (setq filename-sha1sum (car (split-string (s-trim-full (shell-command-to-string (concat "sha1sum \"" filename "\""))))))
     (if (assoc-string filename all-annotations)
         (setcdr (assoc-string filename all-annotations)
-                file-annotations)
+                (cons filename-sha1sum (sort file-annotations (lambda (e1 e2)
+                                                                (< (car e1) (car e2))))))
       (setq all-annotations
-            (push (cons filename file-annotations)
+            (push (cons filename (cons filename-sha1sum (sort file-annotations (lambda (e1 e2)
+                                                                                 (< (car e1) (car e2))))))
                   all-annotations)))
     ;; remove duplicate entries (a user reported seeing them)
     (dolist (entry all-annotations)
@@ -427,12 +539,13 @@ annotation plus the newline."
   "Searches the line before point for annotations, and returns a
 `facespec` with the annotation in its `display` property."
   (save-excursion
-    (goto-char (1- (point))) ; we start at the start of the next line
+    (goto-char (1- (point)))  ; we start at the start of the next line
     ;; find overlays in the preceding line
     (let ((prefix (annotate-make-prefix)) ; white space before first annotation
           (bol (progn (beginning-of-line) (point)))
           (eol (progn (end-of-line) (point)))
           (text "")
+          (annotation-symbol nil)
           (overlays nil))
       ;; include previous line if point is at bol:
       (when (eq nil (overlays-in bol eol))
@@ -442,40 +555,57 @@ annotation plus the newline."
                              (< (overlay-end x) (overlay-end y)))))
       ;; put each annotation on its own line
       (dolist (ov overlays)
-        (if (overlay-get ov 'annotation)
-            (dolist (l (save-match-data
-                         (split-string
-                          (annotate-lineate (overlay-get ov 'annotation)
-                                            (- eol bol)) "\n")))
-              (setq text
-                    (concat text prefix
-                            (propertize l 'face 'annotate-annotation)
-                            "\n"))
-              ;; white space before for all but the first annotation
-              (setq prefix (make-string annotate-annotation-column ? )))))
+        ;; TODO: let overlay-get
+        (let ((overlay-annotation (overlay-get ov 'annotation)))
+          (if overlay-annotation
+              (cond ((symbolp overlay-annotation)
+                     ;; TODO: put checkmark annotations here
+                     (setq annotation-symbol overlay-annotation)
+                     )
+                    (t
+                     (dolist (l (save-match-data
+                                  (split-string
+                                   ;; TODO: won't fill in quite yet
+                                   (annotate-lineate (overlay-get ov 'annotation)
+                                                     (- eol bol)) "\n")))
+                       (setq text
+                             (concat text prefix
+                                     (propertize l 'face 'annotate-annotation)
+                                     "\n"))
+                       ;; white space before for all but the first annotation
+                       (setq prefix (make-string annotate-annotation-column ? ))))))))
       ;; build facecpec with the annotation text as display property
-      (if (string= text "")
-          ;; annotation has been removed: remove display prop
-          (list 'face 'default 'display nil)
-        ;; annotation has been changed/added: change/add display prop
-        (list 'face 'default 'display text)))))
+      (cond (annotation-symbol
+             (cond ((eq annotation-symbol 'checkmark)
+                    ;; nothing needed for now
+                    nil)))
+            ((string= text "")
+             ;; annotation has been removed: remove display prop
+             (list 'face 'default 'display nil))
+            (t
+             ;; annotation has been changed/added: change/add display prop
+             (list 'face 'default 'display text))))))
 
 (defun annotate--remove-annotation-property (begin end)
   "Cleans up annotation properties associated with a region."
-  ;; inhibit infinite loop
-  (setq inhibit-modification-hooks t)
-  ;; inhibit property removal to the undo list
-  (buffer-disable-undo)
-  (save-excursion
-    (goto-char end)
-    ;; go to the EOL where the
-    ;; annotated newline used to be
-    (end-of-line)
-    ;; strip dangling display property
-    (remove-text-properties
-     (point) (1+ (point)) '(display nil)))
-  (buffer-enable-undo)
-  (setq inhibit-modification-hooks nil))
+  (let ((original-buffer-read-only buffer-read-only))
+    (read-only-mode -1)
+    ;; inhibit infinite loop
+    (setq inhibit-modification-hooks t)
+    ;; inhibit property removal to the undo list
+    (buffer-disable-undo)
+    (save-excursion
+      (goto-char end)
+      ;; go to the EOL where the
+      ;; annotated newline used to be
+      (end-of-line)
+      ;; strip dangling display property
+      (remove-text-properties
+       (point) (1+ (point)) '(display nil)))
+    (buffer-enable-undo)
+    (setq inhibit-modification-hooks nil)
+    (when original-buffer-read-only
+      (read-only-mode 1))))
 
 (defun annotate--change-guard ()
   "Returns a `facespec` with an `insert-behind-hooks` property
@@ -484,6 +614,18 @@ text is inserted. This cleans up after newline insertions between
 an overlay and it's annotation."
   (list 'face nil
         'insert-in-front-hooks '(annotate--remove-annotation-property)))
+
+(defun annotate-get-annotate-overlay ()
+  "Get the first overlay that has an annotation property.  I'd
+like this to eventually get multiple overlays for multiple
+annotation on top of one another"
+  (let ((overlays (overlays-at (point)))
+        first-matching-overlay)
+    (dolist (ov overlays)
+      (unless first-matching-overlay
+        (when (and (overlayp ov) (overlay-get ov 'annotation))
+          (setq first-matching-overlay ov))))
+    first-matching-overlay))
 
 (defun annotate-context-before (pos)
   "Context lines before POS."
@@ -518,9 +660,9 @@ an overlay and it's annotation."
 (defun annotate-load-annotations ()
   "Load all annotations from disk."
   (interactive)
-  (let ((annotations (cdr (assoc-string
-                           (substring-no-properties (or (buffer-file-name) ""))
-                           (annotate-load-annotation-data))))
+  (let ((annotations (cddr (assoc-string
+                            (substring-no-properties (or (buffer-file-name) ""))
+                            (annotate-load-annotation-data))))
         (modified-p (buffer-modified-p)))
     ;; remove empty annotations created by earlier bug:
     (setq annotations (cl-remove-if (lambda (ann) (eq (nth 2 ann) nil))
@@ -532,8 +674,8 @@ an overlay and it's annotation."
         (dolist (annotation annotations)
           (let ((start (nth 0 annotation))
                 (end (nth 1 annotation))
-                (text (nth 2 annotation)))
-            (annotate-create-annotation start end text)))))
+                (text-or-symbol (nth 2 annotation)))
+            (annotate-create-annotation start end text-or-symbol)))))
     (set-buffer-modified-p modified-p)
     (font-lock-fontify-buffer)
     (if annotate-use-messages
@@ -557,38 +699,81 @@ an overlay and it's annotation."
       (delete-overlay ov))
     (set-buffer-modified-p modified-p)))
 
-(defun annotate-create-annotation (start end &optional text)
+;; (overlay-get (car (overlays-at (point))) 'annotation)
+(defun annotate-create-annotation (start end &optional text-or-symbol)
   "Create a new annotation for selected region."
-  (let ((annotation (or text (read-from-minibuffer "Annotation: "))))
-    (when (not (or (eq nil annotation) (string= "" annotation)))
-      (let ((highlight (make-overlay start end)))
-        (overlay-put highlight 'face 'annotate-highlight)
-        (overlay-put highlight 'annotation annotation))
-      (if (use-region-p) (deactivate-mark))))
-  (save-excursion
-    (goto-char end)
-    (font-lock-fontify-block 1)))
+  ;; TODO: this is grossly bad in terms of code clones
+  (let* ((annotation (or text-or-symbol (read-from-minibuffer "Annotation: ")))
+         did-it
+         (current-symbolic-overlay (annotate-get-annotate-overlay))
+         (current-symbolic-overlay-type (when current-symbolic-overlay
+                                          (overlay-get current-symbolic-overlay 'annotation))))
+    (cond ((eq text-or-symbol 'checkmark)
+           (let ((highlight (if current-symbolic-overlay-type
+                                current-symbolic-overlay
+                              (make-overlay start end))))
+             (overlay-put highlight 'face 'annotate-checkmark)
+             (overlay-put highlight 'annotation 'checkmark)
+             ;; TODO: assume margin is 2 wide for now
+             (overlay-put highlight 'before-string (propertize "Z" 'display '((margin left-margin) "☑ "))))
+           (setq did-it t))
+          ((eq text-or-symbol 'construction-mark)
+           (let ((highlight (if current-symbolic-overlay-type
+                                current-symbolic-overlay
+                              (make-overlay start end))))
+             (overlay-put highlight 'face 'annotate-construction-mark)
+             (overlay-put highlight 'annotation 'construction-mark)
+             ;; TODO: assume margin is 2 wide for now
+             (overlay-put highlight 'before-string (propertize "Z" 'display '((margin left-margin) "IP"))))
+           (setq did-it t))
+          ((eq text-or-symbol 'x-mark)
+           (let ((highlight (if current-symbolic-overlay-type
+                                current-symbolic-overlay
+                              (make-overlay start end))))
+             (overlay-put highlight 'face 'annotate-x-mark)
+             (overlay-put highlight 'annotation 'x-mark)
+             ;; TODO: assume margin is 2 wide for now
+             (overlay-put highlight 'before-string (propertize "Z" 'display '((margin left-margin) "X "))))
+           (setq did-it t))
+          (t
+           (when (not (or (eq nil annotation) (string= "" annotation)))
+             (let ((highlight (make-overlay start end)))
+               (overlay-put highlight 'face 'annotate-highlight)
+               (overlay-put highlight 'annotation annotation))
+             (setq did-it t))))
+    (when did-it
+      (if (use-region-p) (deactivate-mark))
+      (save-excursion
+        (goto-char end)
+        (font-lock-fontify-block 1)))))
 
 (defun annotate-change-annotation (pos)
   "Change annotation at point. If empty, delete annotation."
-  (let* ((highlight (car (overlays-at pos)))
-         (annotation (read-from-minibuffer
-                      "Annotation: "
-                      (overlay-get highlight 'annotation))))
-    (save-excursion
-      (goto-char (overlay-end highlight))
-      (move-end-of-line nil)
-      (cond
-       ;; annotation was cancelled:
-       ((eq nil annotation))
-       ;; annotation was erased:
-       ((string= "" annotation)
-        (annotate--remove-annotation-property
-         (overlay-start highlight)
-         (overlay-end highlight))
-        (delete-overlay highlight))
-       ;; annotation was changed:
-       (t (overlay-put highlight 'annotation annotation))))))
+  (let* ((highlight (annotate-get-annotate-overlay))
+         (annotation-get (overlay-get highlight 'annotation))
+         annotation-text)
+    (when (not (symbolp annotation-get))
+      (setq annotation-text (when (not (symbolp annotation-get))
+                              (read-from-minibuffer
+                               "Annotation: "
+                               annotation-get)))
+      (save-excursion
+        (goto-char (overlay-end highlight))
+        (move-end-of-line nil)
+        (cond
+         ;; annotation was cancelled:
+         ((eq nil annotation-text))
+         ;; annotation was erased:
+         ((string= "" annotation-text)
+          (annotate--remove-annotation-property
+           (overlay-start highlight)
+           (overlay-end highlight))
+          (delete-overlay highlight)
+          t)
+         ;; annotation was changed:
+         (t
+          (overlay-put highlight 'annotation annotation-text)
+          t))))))
 
 (defun annotate-make-prefix ()
   "An empty string from the end of the line upto the annotation."
